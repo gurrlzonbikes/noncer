@@ -1,157 +1,115 @@
 # Noncer
 
-Control what agents can do, when they can do it, and how many times.
+**High-stakes / low-frequency automation gate:** run a command only when a **Ledger-signed** on-chain intent is valid, the sender is **eligible** (ERC-721 balance > 0), and the **application nonce** matches the gate’s **monotonic** counter.
+
+No API keys. The trust model is **hardware key + on-chain eligibility + explicit sequence** (not long-lived CI secrets).
 
 ---
 
-## Why this exists
+## Model
 
-CI pipelines and autonomous agents are increasingly powerful—and increasingly unsafe.
+| Piece | Role |
+|--------|------|
+| **Identity** | Ethereum key on **Ledger** (tx signature) |
+| **Eligibility** | On-chain: `balanceOf(sender) > 0` for a configured NFT |
+| **Nonce** | **Application** nonce: gate stores `expected_nonce` per address; intent JSON must match; gate increments **only after successful execution** |
+| **Replay** | Each mined tx handled **once** (persisted tx-hash set); wrong nonce rejected without advancing |
 
-They:
+Calldata is UTF-8 JSON:
 
-* hold long-lived secrets
-* execute high-impact actions
-* are hard to stop once triggered
-
-Today’s model is:
-
-```text
-if you have the key → you can do everything
+```json
+{"nonce":0,"action":"echo hello"}
 ```
-
-That doesn’t scale to autonomous systems.
-
----
-
-## What Noncer does
-
-Noncer replaces static permissions with **deterministic execution control**.
-
-Every action must:
-
-```text
-1. come from a valid identity
-2. be allowed right now
-3. be the next expected action
-```
-
----
-
-## Core model
-
-```text
-Auth = identity + eligibility + nonce
-```
-
-* **Identity** → who is acting (agent key)
-* **Eligibility** → are they allowed right now (server-controlled)
-* **Nonce** → is this the correct next action (no replay, no skipping)
 
 ---
 
 ## Architecture
 
 ```text
-Agent (CLI)
-   ↓
-Noncer Server (control layer)
-   ↓
-Protected command / system
+noncer emit  →  Ledger (node/noncer signer)  →  Base Sepolia RPC
+                                                   ↓
+                                         self-transfer tx, data = intent JSON
+
+noncer-watch →  scans blocks → decode intent → NFT check → nonce check → subprocess (demo)
+               ↳ HTTP GET /nonce  so emit can fetch expected nonce
 ```
 
-* Server owns **nonce state**
-* Server enforces **eligibility**
-* CLI acts as a **thin execution wrapper**
+Execution uses `subprocess` with **`shell=True`** — appropriate for demos only; tighten before production (allow-listed binaries, argv lists, timeouts).
 
 ---
 
-## Features
+## Prerequisites
 
-* 🔐 No API keys or shared secrets
-* 🔁 Replay protection via nonce
-* ⚡ Instant revocation (real-time eligibility)
-* 🎯 Deterministic execution order
+- **Python** ≥ 3.10, **Node.js** + `npm install` at repo root (Ledger signing).
+- Ledger with **Ethereum** app; payloads use **generic calldata** — you may need **blind signing** enabled for review on device.
+- **NFT contract** on **Base Sepolia** (chain id **84532** by default).
+- RPC URL (default `https://sepolia.base.org`).
 
 ---
 
-## Installation
+## Install
 
 ```bash
-git clone https://github.com/<your-username>/noncer.git
+git clone https://github.com/<your-org>/noncer.git
 cd noncer
 
 python3 -m venv .venv
 source .venv/bin/activate
-
 pip install -e .
+
+npm install
 ```
 
 ---
 
-## Running the server
+## Configure
+
+| Env / flag | Meaning |
+|------------|---------|
+| `NONCER_STATE_DIR` | Gate persistence (`~/.noncer` default): `gate_state.json` |
+| `NONCER_RPC_URL` | HTTP RPC for watcher + signer |
+| `NONCER_CHAIN_ID` | Default `84532` (Base Sepolia) |
+| `NONCER_GATE_URL` | CLI queries `GET /nonce` here (default `http://127.0.0.1:3090`) |
+| `NONCER_GATE_HOST` / `NONCER_GATE_PORT` | Watcher binds HTTP gate (default `127.0.0.1:3090`) |
+
+---
+
+## Run the gate (watcher)
 
 ```bash
-python server/app.py
+noncer-watch --nft-contract 0xYourERC721Address
 ```
 
-Server runs on:
-
-```text
-http://localhost:3000
-```
+Optional: `--rpc-url`, `--state-dir`, `--gate-port`, `--no-http` (HTTP off; then use `--nonce` on every `emit`).
 
 ---
 
-## Usage
+## Emit an intent
 
-### Allow your agent
+With the watcher running (so `/nonce` is available):
 
 ```bash
-noncer allow
+noncer emit \
+  --address 0xYourAddress \
+  --derivation-path "44'/60'/0'/0/0" \
+  --action 'echo hello'
 ```
 
----
-
-### Execute a command
+Or explicitly:
 
 ```bash
-noncer exec -- echo hello
+noncer nonce --address 0xYourAddress
+noncer emit ... --nonce 0 --action 'echo hello'
 ```
 
 ---
 
-### Revoke access
+## Revocation / delegation
 
-```bash
-noncer revoke
-```
+Changing **NFT ownership** (mint, transfer, burn) updates eligibility **on-chain**. No separate “revoke” endpoint is required for that authorization model.
 
 ---
 
-## Example
+## Status
 
-```bash
-noncer allow
-noncer exec -- echo "step 1"
-noncer exec -- echo "step 2"
-noncer revoke
-noncer exec -- echo "step 3"
-```
-
-Expected:
-
-```text
-✅ Authorized → step 1
-✅ Authorized → step 2
-❌ Blocked: revoked
-```
-
----
-
-## What this demonstrates
-
-* commands cannot be replayed
-* commands cannot be executed out of order
-* access can be revoked instantly
-* no secrets are required
+Experimental research code: hardened policy (capabilities, bounded commands, Fnox-facing adapters) is left to callers building on this gate.

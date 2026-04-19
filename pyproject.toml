@@ -1,9 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "noncer"
-version = "0.1.0"
+version = "0.2.0"
+description = "Hardware-signed on-chain intents with NFT eligibility and monotonic application nonce."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "web3>=6.0",
+  "requests>=2.28",
+  "flask>=3.0",
+]
 
-[tool.setuptools]
-packages = ["noncer"]
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
 
 [project.scripts]
 noncer = "noncer.cli.main:main"
+noncer-watch = "noncer.watcher:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["noncer*"]
+
+[tool.setuptools.package-data]
+noncer = ["js/*.cjs"]

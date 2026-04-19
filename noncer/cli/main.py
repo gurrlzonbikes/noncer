@@ -1,148 +1,112 @@
-import sys
+"""CLI: emit signed intents and query gate nonce."""
+
+from __future__ import annotations
+
+import argparse
 import os
-import json
+import sys
+
 import requests
-import subprocess
-import secrets
 
-SERVER = "http://localhost:3000"
-
-# ----------------------
-# Identity management
-# ----------------------
-
-BASE = os.path.expanduser("~/.noncer")
-IDENTITY_FILE = os.path.join(BASE, "identity.json")
-
-os.makedirs(BASE, exist_ok=True)
+from noncer import __version__
+from noncer.payload import build_intent
+from noncer.sign_ledger import send_intent
 
 
-def load_identity():
-    if os.path.exists(IDENTITY_FILE):
-        with open(IDENTITY_FILE) as f:
-            return json.load(f)
-
-    identity = {"address": secrets.token_hex(20)}
-
-    with open(IDENTITY_FILE, "w") as f:
-        json.dump(identity, f)
-
-    return identity
+DEFAULT_GATE_URL = os.environ.get("NONCER_GATE_URL", "http://127.0.0.1:3090")
+DEFAULT_RPC = os.environ.get("NONCER_RPC_URL", "https://sepolia.base.org")
 
 
-# ----------------------
-# Server helpers
-# ----------------------
-
-def bootstrap(address):
-    requests.post(f"{SERVER}/auth", json={"address": address})
-
-
-def get_nonce(address):
-    r = requests.get(f"{SERVER}/nonce", params={"address": address})
-    return r.json().get("nonce", 0)
+def fetch_expected_nonce(address: str, gate_url: str) -> int:
+    url = gate_url.rstrip("/") + "/nonce"
+    r = requests.get(url, params={"address": address}, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    return int(data["expected"])
 
 
-def execute_request(address, nonce, action, signature):
-    return requests.post(
-        f"{SERVER}/execute",
-        json={
-            "address": address,
-            "nonce": nonce,
-            "action": action,
-            "sig": signature,
-        },
+def cmd_emit(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="noncer emit", description="Sign and broadcast intent (Ledger)")
+    p.add_argument("--address", required=True, help="Your Ethereum address")
+    p.add_argument("--derivation-path", required=True, help="Ledger path e.g. 44'/60'/0'/0/0")
+    p.add_argument("--action", required=True, help="Shell command for the gate to execute")
+    p.add_argument("--nonce", type=int, default=None, help="Application nonce (default: query gate)")
+    p.add_argument("--gate-url", default=DEFAULT_GATE_URL)
+    p.add_argument("--rpc-url", default=DEFAULT_RPC)
+    p.add_argument("--chain-id", type=int, default=int(os.environ.get("NONCER_CHAIN_ID", "84532")))
+    ns = p.parse_args(argv)
+
+    nonce = ns.nonce
+    if nonce is None:
+        try:
+            nonce = fetch_expected_nonce(ns.address, ns.gate_url)
+            print(f"📋 Expected application nonce from gate: {nonce}")
+        except requests.RequestException as e:
+            print(
+                "❌ Could not reach gate for nonce. Start the watcher or pass --nonce explicitly.\n",
+                e,
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    payload = build_intent(nonce, ns.action)
+    result = send_intent(
+        payload=payload,
+        address=ns.address,
+        derivation_path=ns.derivation_path,
+        rpc_url=ns.rpc_url,
+        chain_id=ns.chain_id,
     )
 
+    if result.returncode != 0:
+        print("❌ Signing/broadcast failed:", file=sys.stderr)
+        print(result.stderr or result.stdout, file=sys.stderr)
+        sys.exit(result.returncode or 1)
 
-def allow(address):
-    requests.post(f"{SERVER}/allow", json={"address": address})
-
-
-def revoke(address):
-    requests.post(f"{SERVER}/revoke", json={"address": address})
-
-
-# ----------------------
-# Commands
-# ----------------------
-
-def cmd_allow(address):
-    allow(address)
-    print("✅ Allowed:", address)
+    print(result.stdout, end="")
 
 
-def cmd_revoke(address):
-    revoke(address)
-    print("🚫 Revoked:", address)
-
-
-def cmd_status(address):
-    nonce = get_nonce(address)
-    print("🔍 Status")
-    print("Address :", address)
-    print("Nonce   :", nonce)
-
-
-def cmd_exec(address, args):
-    if "--" not in args:
-        print("Usage: noncer exec -- <command>")
+def cmd_nonce(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="noncer nonce", description="Query expected application nonce from gate")
+    p.add_argument("--address", required=True)
+    p.add_argument("--gate-url", default=DEFAULT_GATE_URL)
+    ns = p.parse_args(argv)
+    try:
+        n = fetch_expected_nonce(ns.address, ns.gate_url)
+        print(n)
+    except requests.RequestException as e:
+        print(f"❌ Gate unreachable: {e}", file=sys.stderr)
         sys.exit(1)
 
-    sep = args.index("--")
-    command = args[sep + 1:]
-    action = " ".join(command)
 
-    # 1. bootstrap
-    bootstrap(address)
-
-    # 2. nonce
-    nonce = get_nonce(address)
-
-    # 3. sign (mock for now)
-    signature = f"signed({address}:{nonce}:{action})"
-
-    # 4. execute request
-    r = execute_request(address, nonce, action, signature)
-
-    if r.status_code != 200:
-        print("❌ Blocked:", r.text)
-        sys.exit(1)
-
-    print(f"✅ Authorized (nonce={nonce}) → {action}")
-
-    # 5. run command
-    subprocess.run(command)
-
-
-# ----------------------
-# Main entrypoint
-# ----------------------
-
-def main():
-    identity = load_identity()
-    address = identity["address"]
-
+def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: noncer [allow|revoke|exec|status]")
+        print(
+            f"noncer {__version__}\n\nUsage: noncer emit ... | noncer nonce ...",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     cmd = sys.argv[1]
+    rest = sys.argv[2:]
 
-    if cmd == "allow":
-        cmd_allow(address)
+    if cmd in ("-h", "--help"):
+        print(
+            f"noncer {__version__}\n\n"
+            "Commands:\n"
+            "  emit   Ledger-sign intent JSON and broadcast (see: noncer emit -h)\n"
+            "  nonce  Print expected application nonce (see: noncer nonce -h)"
+        )
+        return
 
-    elif cmd == "revoke":
-        cmd_revoke(address)
-
-    elif cmd == "status":
-        cmd_status(address)
-
-    elif cmd == "exec":
-        cmd_exec(address, sys.argv[1:])
-
+    if cmd == "emit":
+        cmd_emit(rest)
+    elif cmd == "nonce":
+        cmd_nonce(rest)
+    elif cmd in ("-V", "--version"):
+        print(__version__)
     else:
-        print(f"Unknown command: {cmd}")
+        print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
 
 
