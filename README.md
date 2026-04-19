@@ -15,6 +15,7 @@ No API keys. The trust model is **hardware key + structured signing + on-chain e
 | **Eligibility** | `balanceOf(sender) > 0` for a configured NFT |
 | **Nonce** | Application nonce in the typed message must equal gate state; incremented **only after successful execution** |
 | **Replay** | Each mined tx handled **once** (persisted tx-hash set) |
+| **Execution** | The EIP-712 **`action`** string is an **intent key** only. The gate maps it to a **fixed argv** via a local **allow-list file** — **no shell** (`shell=False`). |
 
 ### Calldata v1 (single tx)
 
@@ -28,7 +29,7 @@ where `v,r,s` are the **EIP-712** signature over the intent (not the tx signatur
 
 ## Ledger UX (two prompts)
 
-1. **Sign EIP-712 intent** — structured fields on device (`nonce`, `action`, `policyCommitment`, domain).
+1. **Sign EIP-712 intent** — structured fields on device (`nonce`, `action`, `policyCommitment`, domain). Here **`action`** is the **same string** as the allow-list key (e.g. `scan-staging`).
 2. **Sign the EIP-1559 transaction** that carries the packed calldata (may present as data signing / blind depending on firmware).
 
 ---
@@ -41,11 +42,31 @@ noncer emit  →  Node signer:
                   2) pack calldata v1 + Ledger.signTransaction → broadcast
 
 noncer-watch →  decode v1 → ecrecover EIP-712 digest → must match from
-               → NFT → application nonce → subprocess (demo)
+               → NFT → application nonce → argv from allow-list JSON
                → GET /nonce for emit
 ```
 
-Execution uses `subprocess` with **`shell=True`** — demo only; use argv allow-lists for real use.
+---
+
+## Command allow-list (required)
+
+The gate **does not** interpret `action` as a shell command. Create a JSON file (default path: `$NONCER_STATE_DIR/allowlist.json`, usually `~/.noncer/allowlist.json`):
+
+```json
+{
+  "commands": {
+    "echo-demo": ["/bin/echo", "hello"],
+    "true-cmd": ["/bin/true"]
+  }
+}
+```
+
+- Keys must match the **`action`** field in the signed intent **exactly** (after trim).
+- Values are **argv arrays**: first element is the executable; remaining entries are literal arguments controlled by **you**, not by the signer’s string parsing.
+
+Override path: `--allowlist /path/to/allowlist.json` or env **`NONCER_ALLOWLIST`**.
+
+Optional **`--strict-executable`** (or **`NONCER_STRICT_EXECUTABLE=1`**): require `argv[0]` to exist on disk and be executable (recommended on production gate hosts).
 
 ---
 
@@ -79,7 +100,9 @@ Match **EIP-712 domain** between CLI and watcher (`name`, `version`, `chainId`, 
 
 | Env / flag | Meaning |
 |------------|---------|
-| `NONCER_STATE_DIR` | Gate persistence (`~/.noncer`): `gate_state.json` |
+| `NONCER_STATE_DIR` | Gate persistence (`~/.noncer`): `gate_state.json`, default **allow-list** path |
+| `NONCER_ALLOWLIST` | Path to allow-list JSON (overrides default `<state-dir>/allowlist.json`) |
+| `NONCER_STRICT_EXECUTABLE` | `1` / `true`: same as watcher `--strict-executable` |
 | `NONCER_RPC_URL` | HTTP RPC |
 | `NONCER_CHAIN_ID` | Default `84532` (Base Sepolia) |
 | `NONCER_GATE_URL` | CLI `GET /nonce` target (default `http://127.0.0.1:3090`) |
@@ -93,21 +116,24 @@ Match **EIP-712 domain** between CLI and watcher (`name`, `version`, `chainId`, 
 ## Run the gate
 
 ```bash
+# Ensure ~/.noncer/allowlist.json exists (or pass --allowlist)
 noncer-watch --nft-contract 0xYourERC721Address \
   --eip712-name Noncer --eip712-version 1
 ```
 
-Optional: `--expected-policy-commitment 0x...` to enforce a manifest hash.
+Optional: `--expected-policy-commitment 0x...`, `--strict-executable`.
 
 ---
 
 ## Emit
 
+Use an **`action`** string that matches an allow-list key:
+
 ```bash
 noncer emit \
   --address 0xYourAddress \
   --derivation-path "44'/60'/0'/0/0" \
-  --action 'echo hello' \
+  --action echo-demo \
   --policy-commitment 0x0000000000000000000000000000000000000000000000000000000000000000
 ```
 
@@ -123,4 +149,4 @@ NFT **transfer/burn** updates eligibility on-chain without a separate revoke API
 
 ## Status
 
-Experimental. Next hardening steps: fixed command templates, no shell, optional **policy allow-list** file keyed by `policyCommitment`.
+Experimental. Execution is **argv templates only** (allow-list JSON); extend with tighter policy manifests via `policyCommitment` as needed.

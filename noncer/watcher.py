@@ -18,6 +18,12 @@ from typing import Any
 from hexbytes import HexBytes
 from web3 import Web3
 
+from noncer.allowlist import (
+    AllowlistError,
+    load_command_allowlist,
+    resolve_argv_for_intent,
+    validate_executable,
+)
 from noncer.calldata_v1 import recover_signer, unpack_v1
 from noncer.state import GateState, default_state_dir
 
@@ -63,9 +69,17 @@ def _run_gate_http(
     app.run(host=bind_host, port=port, threaded=True, use_reloader=False)
 
 
-def execute_action(action: str) -> None:
-    logger.warning("Executing shell command (demo mode): %s", action)
-    subprocess.run(action, shell=True, check=True)
+def execute_action(
+    *,
+    action_key: str,
+    commands: dict[str, list[str]],
+    strict_executable: bool,
+) -> None:
+    """Run a fixed argv template; ``action_key`` must match an allow-list entry (no shell)."""
+    argv = resolve_argv_for_intent(action_key, commands)
+    validate_executable(argv[0], strict=strict_executable)
+    logger.info("Executing allow-listed argv: %s", argv)
+    subprocess.run(argv, shell=False, check=True)
 
 
 def _tx_hash_hex(tx: Any) -> str:
@@ -95,6 +109,8 @@ def process_tx(
     domain_version: str,
     verifying_contract: str,
     expected_policy_bytes: bytes | None,
+    commands: dict[str, list[str]],
+    strict_executable: bool,
 ) -> None:
     if state.has_seen_tx(tx_hash_hex):
         return
@@ -186,7 +202,15 @@ def process_tx(
     logger.info("Eligible intent → nonce=%s action=%r", app_nonce, action)
 
     try:
-        execute_action(action)
+        execute_action(
+            action_key=action,
+            commands=commands,
+            strict_executable=strict_executable,
+        )
+    except AllowlistError as e:
+        logger.info("Allow-list rejected %s: %s", tx_hash_hex, e)
+        state.mark_tx_seen(tx_hash_hex)
+        return
     except subprocess.CalledProcessError as e:
         logger.error("Execution failed for %s: %s", tx_hash_hex, e)
         state.mark_tx_seen(tx_hash_hex)
@@ -210,6 +234,8 @@ def watch_forever(
     domain_version: str,
     verifying_contract: str,
     expected_policy_bytes: bytes | None,
+    commands: dict[str, list[str]],
+    strict_executable: bool,
 ) -> None:
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     if not w3.is_connected():
@@ -252,6 +278,8 @@ def watch_forever(
                         domain_version=domain_version,
                         verifying_contract=verifying_contract,
                         expected_policy_bytes=expected_policy_bytes,
+                        commands=commands,
+                        strict_executable=strict_executable,
                     )
                 state.set_last_block(bn)
 
@@ -301,6 +329,17 @@ def main() -> None:
         default=os.environ.get("NONCER_EXPECTED_POLICY_COMMITMENT"),
         help="If set, intent policyCommitment bytes32 must match this hex",
     )
+    p.add_argument(
+        "--allowlist",
+        type=Path,
+        default=None,
+        help="JSON file: {\"commands\": {\"intent-key\": [\"/bin/app\", \"arg\"]}} (env: NONCER_ALLOWLIST)",
+    )
+    p.add_argument(
+        "--strict-executable",
+        action="store_true",
+        help="Require argv[0] to exist on disk and be executable (recommended on gate hosts)",
+    )
 
     args = p.parse_args()
 
@@ -309,7 +348,21 @@ def main() -> None:
     except ValueError as e:
         raise SystemExit(f"invalid --expected-policy-commitment: {e}") from e
 
+    allow_path = args.allowlist
+    if allow_path is None:
+        env_al = os.environ.get("NONCER_ALLOWLIST")
+        allow_path = Path(env_al) if env_al else Path(args.state_dir) / "allowlist.json"
+
+    try:
+        commands = load_command_allowlist(allow_path)
+    except AllowlistError as e:
+        raise SystemExit(f"allow-list: {e}") from e
+
     state = GateState(args.state_dir)
+
+    strict_exe = args.strict_executable or (
+        os.environ.get("NONCER_STRICT_EXECUTABLE", "").lower() in ("1", "true", "yes")
+    )
 
     watch_forever(
         rpc_url=args.rpc_url,
@@ -323,6 +376,8 @@ def main() -> None:
         domain_version=args.eip712_version,
         verifying_contract=args.verifying_contract,
         expected_policy_bytes=policy_bytes,
+        commands=commands,
+        strict_executable=strict_exe,
     )
 
 

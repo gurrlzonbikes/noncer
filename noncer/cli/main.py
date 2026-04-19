@@ -32,7 +32,11 @@ def cmd_emit(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="noncer emit", description="EIP-712 intent + broadcast (Ledger, two device prompts)")
     p.add_argument("--address", required=True, help="Your Ethereum address")
     p.add_argument("--derivation-path", required=True, help="Ledger path e.g. 44'/60'/0'/0/0")
-    p.add_argument("--action", required=True, help="Shell command for the gate to execute")
+    p.add_argument(
+        "--action",
+        required=True,
+        help="Intent key (must match a key in the gate allow-list JSON → fixed argv, no shell)",
+    )
     p.add_argument("--nonce", type=int, default=None, help="Application nonce (default: query gate)")
     p.add_argument("--policy-commitment", default=DEFAULT_POLICY, help="bytes32 hex (32-byte policy manifest hash)")
     p.add_argument("--gate-url", default=DEFAULT_GATE_URL)
