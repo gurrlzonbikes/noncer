@@ -9,12 +9,15 @@ import sys
 import requests
 
 from noncer import __version__
-from noncer.payload import build_intent
-from noncer.sign_ledger import send_intent
+from noncer.sign_ledger import send_structured_intent
 
 
 DEFAULT_GATE_URL = os.environ.get("NONCER_GATE_URL", "http://127.0.0.1:3090")
 DEFAULT_RPC = os.environ.get("NONCER_RPC_URL", "https://sepolia.base.org")
+DEFAULT_POLICY = os.environ.get(
+    "NONCER_POLICY_COMMITMENT",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+)
 
 
 def fetch_expected_nonce(address: str, gate_url: str) -> int:
@@ -26,15 +29,28 @@ def fetch_expected_nonce(address: str, gate_url: str) -> int:
 
 
 def cmd_emit(argv: list[str]) -> None:
-    p = argparse.ArgumentParser(prog="noncer emit", description="Sign and broadcast intent (Ledger)")
+    p = argparse.ArgumentParser(prog="noncer emit", description="EIP-712 intent + broadcast (Ledger, two device prompts)")
     p.add_argument("--address", required=True, help="Your Ethereum address")
     p.add_argument("--derivation-path", required=True, help="Ledger path e.g. 44'/60'/0'/0/0")
     p.add_argument("--action", required=True, help="Shell command for the gate to execute")
     p.add_argument("--nonce", type=int, default=None, help="Application nonce (default: query gate)")
+    p.add_argument("--policy-commitment", default=DEFAULT_POLICY, help="bytes32 hex (32-byte policy manifest hash)")
     p.add_argument("--gate-url", default=DEFAULT_GATE_URL)
     p.add_argument("--rpc-url", default=DEFAULT_RPC)
     p.add_argument("--chain-id", type=int, default=int(os.environ.get("NONCER_CHAIN_ID", "84532")))
+    p.add_argument("--eip712-name", default=os.environ.get("NONCER_EIP712_NAME", "Noncer"))
+    p.add_argument("--eip712-version", default=os.environ.get("NONCER_EIP712_VERSION", "1"))
+    p.add_argument(
+        "--verifying-contract",
+        default=os.environ.get("NONCER_VERIFYING_CONTRACT", "0x0000000000000000000000000000000000000000"),
+        help="EIP-712 domain verifyingContract (default zero address)",
+    )
     ns = p.parse_args(argv)
+
+    pc = ns.policy_commitment.strip().lower()
+    if not pc.startswith("0x") or len(pc) != 66:
+        print("❌ --policy-commitment must be 32-byte hex (0x + 64 chars)", file=sys.stderr)
+        sys.exit(2)
 
     nonce = ns.nonce
     if nonce is None:
@@ -49,20 +65,27 @@ def cmd_emit(argv: list[str]) -> None:
             )
             sys.exit(1)
 
-    payload = build_intent(nonce, ns.action)
-    result = send_intent(
-        payload=payload,
-        address=ns.address,
-        derivation_path=ns.derivation_path,
-        rpc_url=ns.rpc_url,
-        chain_id=ns.chain_id,
-    )
+    cfg = {
+        "appNonce": nonce,
+        "action": ns.action,
+        "policyCommitment": ns.policy_commitment,
+        "address": ns.address,
+        "derivationPath": ns.derivation_path,
+        "rpcUrl": ns.rpc_url,
+        "chainId": ns.chain_id,
+        "eip712Name": ns.eip712_name,
+        "eip712Version": ns.eip712_version,
+        "verifyingContract": ns.verifying_contract,
+    }
+
+    result = send_structured_intent(cfg, rpc_url=ns.rpc_url, chain_id=ns.chain_id)
 
     if result.returncode != 0:
         print("❌ Signing/broadcast failed:", file=sys.stderr)
         print(result.stderr or result.stdout, file=sys.stderr)
         sys.exit(result.returncode or 1)
 
+    # stdout is TX hash line; stderr has Ledger prompts
     print(result.stdout, end="")
 
 
@@ -94,7 +117,7 @@ def main() -> None:
         print(
             f"noncer {__version__}\n\n"
             "Commands:\n"
-            "  emit   Ledger-sign intent JSON and broadcast (see: noncer emit -h)\n"
+            "  emit   EIP-712 intent + tx (Ledger, two prompts; see: noncer emit -h)\n"
             "  nonce  Print expected application nonce (see: noncer nonce -h)"
         )
         return
