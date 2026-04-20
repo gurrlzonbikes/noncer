@@ -61,7 +61,20 @@ On mismatch / invalid input:
 ## Architecture
 
 ```text
-CLI → Ledger → Blockchain → Watcher → Local execution
+          Intent.nonce
+               │
+               ▼
+CLI ──sign──► Ledger
+               │
+               ▼
+        tx.nonce (same value)
+               │
+               ▼
+        Blockchain (source of truth)
+               │
+               ▼
+        Watcher verifies:
+     Intent.nonce == tx.nonce
 ```
 
 - CLI builds intent
