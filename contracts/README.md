@@ -35,7 +35,7 @@ export DEPLOYER_PRIVATE_KEY=0x...                     # deployer only; keep offl
 ADMIN_ADDRESS=0xYourMultisig npm run deploy-base-sepolia
 ```
 
-Wire `noncer-watch --registry-contract <deployed> [--runner-role ...]` (default role id matches Solidity `RUNNER_ROLE`).
+Wire `noncer-watch --registry-contract <deployed> [--runner-role ...]` (default role id matches Solidity `RUNNER_ROLE`). Emit uses Ethereum **account** nonce for EIP-712 `Intent.nonce` (see repo README).
 
 ## Ops
 

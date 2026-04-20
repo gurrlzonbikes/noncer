@@ -3,8 +3,11 @@
  *   1) EIP-712 clear-sign Intent (nonce, action, policyCommitment)
  *   2) Sign EIP-1559 tx with calldata = 0x01 || abi.encode(..., v, r, s)
  *
- * Stdin: JSON with appNonce, action, policyCommitment (hex 32 bytes), address,
+ * Stdin: JSON with action, policyCommitment (hex 32 bytes), address,
  *        derivationPath, rpcUrl, chainId, eip712Name, eip712Version, verifyingContract
+ *
+ * EIP-712 Intent.nonce and the broadcast tx nonce are both set to eth_getTransactionCount(addr, \"pending\")
+ * so intent nonce == Ethereum tx nonce (dedicated-runner model).
  *
  * Env: NONCER_MAX_FEE_GWEI, NONCER_GAS_LIMIT
  */
@@ -19,7 +22,7 @@ function envInt(name, fallback) {
   return parseInt(v, 10);
 }
 
-function buildTypedData(cfg) {
+function buildTypedData(cfg, intentNonceBig) {
   const chainId = BigInt(cfg.chainId);
   const domain = {
     name: cfg.eip712Name || "Noncer",
@@ -47,7 +50,7 @@ function buildTypedData(cfg) {
   };
 
   const message = {
-    nonce: BigInt(cfg.appNonce),
+    nonce: intentNonceBig,
     action: cfg.action,
     policyCommitment,
   };
@@ -84,14 +87,13 @@ async function main() {
   const {
     address,
     derivationPath,
-    appNonce,
     action,
     rpcUrl,
     chainId,
   } = cfg;
 
-  if (!address || !derivationPath || action === undefined || appNonce === undefined) {
-    console.error("Missing required stdin fields (address, derivationPath, action, appNonce)");
+  if (!address || !derivationPath || action === undefined) {
+    console.error("Missing required stdin fields (address, derivationPath, action)");
     process.exit(2);
   }
 
@@ -101,12 +103,16 @@ async function main() {
   const gasLimit = envInt("NONCER_GAS_LIMIT", 500000);
 
   const provider = new ethers.JsonRpcProvider(rpc);
-  const txNonce = await provider.getTransactionCount(address);
+  const txNonce = await provider.getTransactionCount(address, "pending");
+  const intentNonceBig = BigInt(txNonce);
 
-  const { domain, typesForHash, typedDataForLedger, message, policyCommitment } = buildTypedData({
-    ...cfg,
-    chainId: cid,
-  });
+  const { domain, typesForHash, typedDataForLedger, message, policyCommitment } = buildTypedData(
+    {
+      ...cfg,
+      chainId: cid,
+    },
+    intentNonceBig,
+  );
 
   const transport = await TransportNodeHid.create();
   const eth = new AppEth(transport);
@@ -121,7 +127,7 @@ async function main() {
   const coder = ethers.AbiCoder.defaultAbiCoder();
   const encoded = coder.encode(
     ["uint256", "string", "bytes32", "uint8", "bytes32", "bytes32"],
-    [BigInt(appNonce), action, policyCommitment, vNum, rHex, sHex],
+    [intentNonceBig, action, policyCommitment, vNum, rHex, sHex],
   );
 
   const data = "0x01" + encoded.slice(2);
@@ -130,7 +136,7 @@ async function main() {
     to: address,
     value: 0,
     data,
-    nonce: txNonce,
+    nonce: txNonce, /* same value as EIP-712 Intent.nonce */
     gasLimit,
     maxFeePerGas: ethers.parseUnits(feeGwei, "gwei"),
     maxPriorityFeePerGas: ethers.parseUnits(feeGwei, "gwei"),

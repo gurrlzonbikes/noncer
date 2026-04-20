@@ -1,3 +1,3 @@
-"""Hardware-signed intents with on-chain eligibility and monotonic execution nonce."""
+"""Hardware-signed intents; EIP-712 Intent.nonce matches Ethereum tx.nonce (EOA ordering)."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

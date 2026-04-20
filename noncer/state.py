@@ -1,4 +1,4 @@
-"""Persistent gate state: monotonic nonces per address and processed tx hashes."""
+"""Persistent gate state: block cursor, processed tx hashes, expected EOA tx nonce per runner."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 
 class GateState:
-    """JSON-backed store for ``expected_nonce`` per checksummed address and cursor state."""
+    """JSON-backed store for scan cursor, seen txs, and next expected Ethereum nonce per runner address."""
 
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = Path(state_dir)
@@ -19,14 +19,13 @@ class GateState:
 
     def _load(self) -> dict[str, Any]:
         if not self._path.exists():
-            return {"nonces": {}, "seen_tx": [], "last_block": None}
+            return {"expected_next_eth_nonce": {}, "seen_tx": [], "last_block": None}
         with open(self._path, encoding="utf-8") as f:
             raw = json.load(f)
-        raw.setdefault("nonces", {})
+        raw.setdefault("expected_next_eth_nonce", {})
         raw.setdefault("seen_tx", [])
         if "last_block" not in raw:
             raw["last_block"] = None
-        # normalize seen_tx to set-like list unique
         raw["seen_tx"] = list(dict.fromkeys(raw["seen_tx"]))
         return raw
 
@@ -36,14 +35,16 @@ class GateState:
             json.dump(self._data, f, indent=2, sort_keys=True)
         tmp.replace(self._path)
 
-    def get_expected_nonce(self, address_checksum: str) -> int:
+    def get_expected_next_eth_nonce(self, address_checksum: str) -> int | None:
+        """Next tx nonce the watcher expects for this address, or None if never seen."""
         key = address_checksum.lower()
-        return int(self._data["nonces"].get(key, 0))
+        v = self._data["expected_next_eth_nonce"].get(key)
+        return int(v) if v is not None else None
 
-    def increment_nonce(self, address_checksum: str) -> None:
+    def record_observed_eth_nonce(self, address_checksum: str, mined_tx_nonce: int) -> None:
+        """After observing a mined tx with nonce ``mined_tx_nonce``, chain expects ``mined_tx_nonce + 1`` next."""
         key = address_checksum.lower()
-        n = int(self._data["nonces"].get(key, 0))
-        self._data["nonces"][key] = n + 1
+        self._data["expected_next_eth_nonce"][key] = mined_tx_nonce + 1
         self._save()
 
     def has_seen_tx(self, tx_hash_hex: str) -> bool:
@@ -59,7 +60,6 @@ class GateState:
         existing = {x.lower() for x in self._data["seen_tx"]}
         if h.lower() not in existing:
             self._data["seen_tx"].append(h)
-            # cap growth: keep last 50k hashes
             if len(self._data["seen_tx"]) > 50_000:
                 self._data["seen_tx"] = self._data["seen_tx"][-50_000:]
             self._save()

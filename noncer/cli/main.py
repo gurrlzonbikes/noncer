@@ -1,4 +1,4 @@
-"""CLI: emit signed intents and query gate nonce."""
+"""CLI: emit signed intents (nonce from RPC) and query next Ethereum tx nonce."""
 
 from __future__ import annotations
 
@@ -6,13 +6,12 @@ import argparse
 import os
 import sys
 
-import requests
+from web3 import Web3
 
 from noncer import __version__
 from noncer.sign_ledger import send_structured_intent
 
 
-DEFAULT_GATE_URL = os.environ.get("NONCER_GATE_URL", "http://127.0.0.1:3090")
 DEFAULT_RPC = os.environ.get("NONCER_RPC_URL", "https://sepolia.base.org")
 DEFAULT_POLICY = os.environ.get(
     "NONCER_POLICY_COMMITMENT",
@@ -20,12 +19,13 @@ DEFAULT_POLICY = os.environ.get(
 )
 
 
-def fetch_expected_nonce(address: str, gate_url: str) -> int:
-    url = gate_url.rstrip("/") + "/nonce"
-    r = requests.get(url, params={"address": address}, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    return int(data["expected"])
+def fetch_pending_tx_nonce(address: str, rpc_url: str) -> int:
+    """Next Ethereum tx nonce for ``address`` (matches signer + EIP-712 Intent.nonce)."""
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    if not w3.is_connected():
+        raise ConnectionError(f"cannot connect to RPC: {rpc_url}")
+    cs = Web3.to_checksum_address(address)
+    return int(w3.eth.get_transaction_count(cs, "pending"))
 
 
 def cmd_emit(argv: list[str]) -> None:
@@ -37,9 +37,7 @@ def cmd_emit(argv: list[str]) -> None:
         required=True,
         help="Intent key (must match a key in the gate allow-list JSON → fixed argv, no shell)",
     )
-    p.add_argument("--nonce", type=int, default=None, help="Application nonce (default: query gate)")
     p.add_argument("--policy-commitment", default=DEFAULT_POLICY, help="bytes32 hex (32-byte policy manifest hash)")
-    p.add_argument("--gate-url", default=DEFAULT_GATE_URL)
     p.add_argument("--rpc-url", default=DEFAULT_RPC)
     p.add_argument("--chain-id", type=int, default=int(os.environ.get("NONCER_CHAIN_ID", "84532")))
     p.add_argument("--eip712-name", default=os.environ.get("NONCER_EIP712_NAME", "Noncer"))
@@ -56,21 +54,14 @@ def cmd_emit(argv: list[str]) -> None:
         print("❌ --policy-commitment must be 32-byte hex (0x + 64 chars)", file=sys.stderr)
         sys.exit(2)
 
-    nonce = ns.nonce
-    if nonce is None:
-        try:
-            nonce = fetch_expected_nonce(ns.address, ns.gate_url)
-            print(f"📋 Expected application nonce from gate: {nonce}")
-        except requests.RequestException as e:
-            print(
-                "❌ Could not reach gate for nonce. Start the watcher or pass --nonce explicitly.\n",
-                e,
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    try:
+        pending = fetch_pending_tx_nonce(ns.address, ns.rpc_url)
+        print(f"📋 Next Ethereum tx.nonce / EIP-712 Intent.nonce (pending): {pending}")
+    except Exception as e:
+        print(f"❌ Could not read nonce from RPC.\n{e}", file=sys.stderr)
+        sys.exit(1)
 
     cfg = {
-        "appNonce": nonce,
         "action": ns.action,
         "policyCommitment": ns.policy_commitment,
         "address": ns.address,
@@ -89,20 +80,22 @@ def cmd_emit(argv: list[str]) -> None:
         print(result.stderr or result.stdout, file=sys.stderr)
         sys.exit(result.returncode or 1)
 
-    # stdout is TX hash line; stderr has Ledger prompts
     print(result.stdout, end="")
 
 
 def cmd_nonce(argv: list[str]) -> None:
-    p = argparse.ArgumentParser(prog="noncer nonce", description="Query expected application nonce from gate")
+    p = argparse.ArgumentParser(
+        prog="noncer nonce",
+        description="Print next Ethereum tx nonce (pending pool) — same value used for EIP-712 Intent.nonce",
+    )
     p.add_argument("--address", required=True)
-    p.add_argument("--gate-url", default=DEFAULT_GATE_URL)
+    p.add_argument("--rpc-url", default=DEFAULT_RPC)
     ns = p.parse_args(argv)
     try:
-        n = fetch_expected_nonce(ns.address, ns.gate_url)
+        n = fetch_pending_tx_nonce(ns.address, ns.rpc_url)
         print(n)
-    except requests.RequestException as e:
-        print(f"❌ Gate unreachable: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ RPC error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -122,7 +115,7 @@ def main() -> None:
             f"noncer {__version__}\n\n"
             "Commands:\n"
             "  emit   EIP-712 intent + tx (Ledger, two prompts; see: noncer emit -h)\n"
-            "  nonce  Print expected application nonce (see: noncer nonce -h)"
+            "  nonce  Next Ethereum tx nonce / intent nonce from RPC (see: noncer nonce -h)"
         )
         return
 

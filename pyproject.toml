@@ -4,13 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noncer"
-version = "0.4.0"
-description = "Hardware-signed on-chain intents with AccessControl registry eligibility and monotonic nonce."
+version = "0.5.0"
+description = "Hardware-signed intents: EIP-712 nonce equals Ethereum tx nonce, registry eligibility, argv gate."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "web3>=6.0",
-  "requests>=2.28",
   "flask>=3.0",
   "eth-account>=0.10",
 ]
